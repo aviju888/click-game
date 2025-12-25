@@ -33,7 +33,8 @@ export async function GET(request: NextRequest) {
       votesRemaining,
     });
   } catch (error) {
-    console.error('Error fetching counters:', error);
+    // Error logging without any user data
+    console.error('Error fetching counters');
     return NextResponse.json(
       { error: 'Failed to fetch counters' },
       { status: 500 }

@@ -17,7 +17,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(tokenRequest);
   } catch (error) {
-    console.error('Error creating Ably token:', error);
+    // Error logging without any user data
+    console.error('Error creating Ably token');
     return NextResponse.json(
       { error: 'Failed to create token' },
       { status: 500 }

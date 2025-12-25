@@ -103,6 +103,9 @@ export async function POST(request: NextRequest) {
 
     let votesRemaining = 0;
     if (!isAdmin) {
+      // Track this client ID in a set for potential vote resets
+      await redis.sadd(`voters:${today}`, clientId);
+      
       // Atomically increment vote count first, then check limit
       // This is more robust than check-then-increment
       const newVoteCount = await redis.incr(`votes:${clientId}:${today}`);
@@ -120,6 +123,15 @@ export async function POST(request: NextRequest) {
       // Admin: don't track votes, set to unlimited
       votesRemaining = 999;
     }
+
+    // Track total votes ever (for statistics)
+    await redis.incr('stats:total-votes');
+    
+    // Track unique users (add to set)
+    await redis.sadd('stats:all-users', clientId);
+    
+    // Track team membership for stats
+    await redis.sadd(`stats:team-${team}-users`, clientId);
 
     // Atomically increment/decrement the counter
     if (delta === 1) {
@@ -144,6 +156,15 @@ export async function POST(request: NextRequest) {
     // Calculate team score
     const teamScore = counters[0] + counters[1] + counters[2];
 
+    // Store last vote globally (NO IP ADDRESS - only vote info)
+    const lastVote = {
+      counterId,
+      delta,
+      team,
+      timestamp: Date.now(),
+    };
+    await redis.set('last-vote', JSON.stringify(lastVote));
+
     // Publish update to Ably channel
     try {
       const channel = ably.channels.get(CHANNEL_NAME);
@@ -151,9 +172,11 @@ export async function POST(request: NextRequest) {
         counters,
         teamScore,
         timestamp: Date.now(),
+        lastVote, // Include in real-time update
       });
     } catch (ablyError) {
-      console.error('Error publishing to Ably:', ablyError);
+      // Error logging without IP
+      console.error('Error publishing to Ably');
       // Continue even if Ably fails
     }
 
@@ -165,7 +188,8 @@ export async function POST(request: NextRequest) {
       success: true,
     });
   } catch (error) {
-    console.error('Error processing click:', error);
+    // Error logging without any user data
+    console.error('Error processing click');
     return NextResponse.json(
       { error: 'Failed to process click' },
       { status: 500 }

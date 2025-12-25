@@ -67,7 +67,8 @@ export async function POST(request: NextRequest) {
           timestamp: Date.now(),
         });
       } catch (error) {
-        console.error('Error publishing reset:', error);
+        // Error logging without any user data
+        console.error('Error publishing reset');
       }
 
       return NextResponse.json({ success: true, message: 'All counters reset' });
@@ -90,6 +91,32 @@ export async function POST(request: NextRequest) {
         redis.set('counter:2:value', 0),
         redis.set('counter:3:value', 0),
       ]);
+      
+      // Reset total votes count (accounting for resets)
+      await redis.set('stats:total-votes', 0);
+
+      // Reset all vote limits for today
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      try {
+        // Get all client IDs that have voted today
+        const voterSetKey = `voters:${today}`;
+        const clientIds = await redis.smembers<string[]>(voterSetKey);
+        
+        if (clientIds && clientIds.length > 0) {
+          // Delete vote counts for all clients
+          const deletePromises = clientIds.map(clientId => 
+            redis.del(`votes:${clientId}:${today}`)
+          );
+          await Promise.all(deletePromises);
+        }
+        
+        // Clear the voters set
+        await redis.del(voterSetKey);
+      } catch (error) {
+        // Error logging without any user data
+        console.error('Error resetting votes');
+        // Continue even if vote reset fails
+      }
 
       // Publish update
       const { ably, CHANNEL_NAME } = await import('@/lib/ably');
@@ -101,10 +128,11 @@ export async function POST(request: NextRequest) {
           timestamp: Date.now(),
         });
       } catch (error) {
-        console.error('Error publishing reset:', error);
+        // Error logging without any user data
+        console.error('Error publishing reset');
       }
 
-      return NextResponse.json({ success: true, message: 'Everything reset' });
+      return NextResponse.json({ success: true, message: 'Everything reset (counters and all vote limits)' });
     }
 
     return NextResponse.json(
@@ -112,7 +140,8 @@ export async function POST(request: NextRequest) {
       { status: 400 }
     );
   } catch (error) {
-    console.error('Error resetting:', error);
+    // Error logging without any user data
+    console.error('Error resetting');
     return NextResponse.json(
       { error: 'Failed to reset' },
       { status: 500 }

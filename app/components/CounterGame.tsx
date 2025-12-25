@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import * as Ably from 'ably';
+import { track } from '@vercel/analytics';
 
 type Team = 'A' | 'B';
 
@@ -24,6 +25,13 @@ interface PendingVote {
   delta: 1 | -1;
 }
 
+interface GlobalVote {
+  counterId: number;
+  delta: number;
+  team: Team;
+  timestamp: number;
+}
+
 // Icons
 const DiceIcon = ({ className }: { className?: string }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter">
@@ -33,6 +41,12 @@ const DiceIcon = ({ className }: { className?: string }) => (
     <circle cx="16" cy="8" r="1" fill="currentColor" stroke="none" />
     <circle cx="8" cy="16" r="1" fill="currentColor" stroke="none" />
     <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const CrownIcon = ({ className }: { className?: string }) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter">
+    <path d="M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14" />
   </svg>
 );
 
@@ -51,6 +65,16 @@ export default function CounterGame() {
   const [ablyConnected, setAblyConnected] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [voteHistory, setVoteHistory] = useState<VoteLog[]>([]);
+  const [lastGlobalVote, setLastGlobalVote] = useState<GlobalVote | null>(null);
+  const [activeLogTab, setActiveLogTab] = useState<'local' | 'global'>('local');
+  
+  // Statistics State
+  const [stats, setStats] = useState({
+    totalVotes: 0,
+    totalUsers: 0,
+    teamAUsers: 0,
+    teamBUsers: 0,
+  });
   
   // Random Vote State
   const [showRandomModal, setShowRandomModal] = useState(false);
@@ -63,6 +87,7 @@ export default function CounterGame() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [showWinnerTest, setShowWinnerTest] = useState(false);
 
   // Countdown Timer Logic
   useEffect(() => {
@@ -139,7 +164,7 @@ export default function CounterGame() {
 
   // Ably Setup
   useEffect(() => {
-    let ablyClient: Ably.Realtime | null = null; 
+    let ablyClient: Ably.Realtime | null = null;
     let channel: Ably.RealtimeChannel | null = null;
 
     const initAbly = async () => {
@@ -168,6 +193,10 @@ export default function CounterGame() {
           if (data) {
             setCounters(data.counters);
             setTeamScore(data.teamScore);
+            // Update last global vote if included in message
+            if (data.lastVote) {
+              setLastGlobalVote(data.lastVote);
+            }
           }
         });
       } catch (error) {
@@ -180,7 +209,40 @@ export default function CounterGame() {
     fetchCounters();
     checkAdminStatus();
 
+    // Fetch initial last vote
+    const fetchLastVote = async () => {
+      try {
+        const response = await fetch('/api/last-vote');
+        if (response.ok) {
+          const data = await response.json();
+          setLastGlobalVote(data.lastVote);
+        }
+      } catch (error) {
+        // Silently fail
+      }
+    };
+    
+    // Fetch statistics
+    const fetchStats = async () => {
+      try {
+        const response = await fetch('/api/stats');
+        if (response.ok) {
+          const data = await response.json();
+          setStats(data);
+        }
+      } catch (error) {
+        // Silently fail
+      }
+    };
+    
+    fetchLastVote();
+    fetchStats();
+    
+    // Refresh stats periodically
+    const statsInterval = setInterval(fetchStats, 10000); // Every 10 seconds
+
     return () => {
+      clearInterval(statsInterval);
       channel?.unsubscribe();
       ablyClient?.close();
     };
@@ -220,11 +282,16 @@ export default function CounterGame() {
         setSuccessMessage('ADMIN LOGGED OUT');
         // Refresh to get real vote count
         fetchCounters();
+        
+        // Track admin logout
+        track('admin_logout', { success: 'true' });
       } else {
         setErrorMessage('LOGOUT FAILED');
+        track('admin_logout', { success: 'false' });
       }
     } catch {
       setErrorMessage('SYSTEM ERROR');
+      track('admin_logout', { success: 'error' });
     }
   };
 
@@ -239,11 +306,30 @@ export default function CounterGame() {
       if (response.ok) {
         setSuccessMessage(`${type.toUpperCase()} RESET SUCCESSFUL`);
         fetchCounters();
+        
+        // Track admin reset
+        track('admin_reset', { type });
+        
+        // Refresh stats after reset
+        const fetchStats = async () => {
+          try {
+            const response = await fetch('/api/stats');
+            if (response.ok) {
+              const data = await response.json();
+              setStats(data);
+            }
+          } catch (error) {
+            // Silently fail
+          }
+        };
+        fetchStats();
       } else {
         setErrorMessage('RESET FAILED');
+        track('admin_reset', { type, success: 'false' });
       }
     } catch {
       setErrorMessage('RESET FAILED');
+      track('admin_reset', { type, success: 'error' });
     }
   };
 
@@ -254,6 +340,15 @@ export default function CounterGame() {
       setErrorMessage(`WAIT: ${timeUntilReset}`);
       return;
     }
+
+    // Track vote click
+    track('vote_click', {
+      counterId,
+      delta,
+      team: userTeam || 'unknown',
+      isAdmin: isAdmin.toString(),
+      votesRemaining: votesRemaining,
+    });
 
     setIsSubmitting(true);
 
@@ -298,6 +393,20 @@ export default function CounterGame() {
       setTeamScore(data.teamScore);
       setVotesRemaining(data.votesRemaining);
       if (data.team) setUserTeam(data.team);
+      
+      // Refresh stats after successful vote
+      const fetchStats = async () => {
+        try {
+          const response = await fetch('/api/stats');
+          if (response.ok) {
+            const data = await response.json();
+            setStats(data);
+          }
+        } catch (error) {
+          // Silently fail
+        }
+      };
+      fetchStats();
       
     } catch (error) {
       // Revert optimistic update on error
@@ -374,6 +483,13 @@ export default function CounterGame() {
     // Refresh to get accurate state
     await fetchCounters();
     
+    // Track random vote completion
+    track('random_vote_completed', {
+      successCount,
+      failCount,
+      team: userTeam || 'unknown',
+    });
+
     if (failCount === 0) {
       setSuccessMessage('RANDOM CHAOS UNLEASHED');
     } else if (successCount > 0) {
@@ -393,6 +509,13 @@ export default function CounterGame() {
   const maxScoreReference = 500;
   const rawPercentage = (teamScore / maxScoreReference) * 50; 
   const indicatorPosition = Math.min(Math.max(50 + rawPercentage, 5), 95);
+  
+  // Calculate winning team
+  const winningTeam = teamScore > 0 ? 'A' : teamScore < 0 ? 'B' : 'TIE';
+  
+  // Calculate individual team scores
+  const teamAScore = Math.max(0, teamScore);
+  const teamBScore = Math.abs(Math.min(0, teamScore));
 
   return (
     <div className="min-h-screen w-full bg-[#c0c0c0] flex flex-col items-center py-8 px-4 font-mono text-black border-8 border-gray-400 relative">
@@ -401,8 +524,86 @@ export default function CounterGame() {
       {(errorMessage || successMessage) && (
         <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 border-2 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] ${errorMessage ? 'bg-red-500 text-white' : 'bg-green-500 text-black'}`}>
           <span className="font-bold uppercase">{errorMessage || successMessage}</span>
+          </div>
+        )}
+
+      {/* Winner Test Modal */}
+      {showWinnerTest && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white border-4 border-black p-6 w-full max-w-md shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] animate-scale-in">
+            <h3 className="text-xl font-black uppercase mb-4 text-center border-b-2 border-black pb-2">
+              WINNER TEST PREVIEW
+            </h3>
+            
+            <div className="space-y-4 mb-6">
+              {/* Test Team A Winner */}
+              <div 
+                className="w-full border-2 border-black flex items-center justify-between p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] bg-blue-600 text-white"
+              >
+                <div className="flex items-center gap-3 font-black uppercase tracking-wider">
+                  <div className="w-8 h-8 flex items-center justify-center">
+                    <CrownIcon />
+                  </div>
+                  <div className="flex flex-col items-start leading-none gap-1">
+                    <span className="text-[10px] text-white/80">YESTERDAY'S CHAMPION</span>
+                    <span className="text-xl drop-shadow-sm">
+                      TEAM A <span className="opacity-80 text-sm font-medium">(+1420)</span>
+          </span>
+                  </div>
+                </div>
         </div>
-      )}
+
+              {/* Test Team B Winner */}
+              <div 
+                className="w-full border-2 border-black flex items-center justify-between p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] bg-red-600 text-white"
+              >
+                <div className="flex items-center gap-3 font-black uppercase tracking-wider">
+                  <div className="w-8 h-8 flex items-center justify-center">
+                    <CrownIcon />
+                  </div>
+                  <div className="flex flex-col items-start leading-none gap-1">
+                    <span className="text-[10px] text-white/80">YESTERDAY'S CHAMPION</span>
+                    <span className="text-xl drop-shadow-sm">
+                      TEAM B <span className="opacity-80 text-sm font-medium">(-2100)</span>
+          </span>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Test Tie Scenario */}
+              <div 
+                className="w-full border-2 border-black flex items-center justify-between p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] bg-gray-100 text-gray-500"
+              >
+                <div className="flex items-center gap-3 font-black uppercase tracking-wider">
+                  <div className="flex flex-col items-start leading-none gap-1">
+                    <span className="text-[10px] text-gray-400">YESTERDAY'S CHAMPION</span>
+                    <span className="text-xl">TIE (0)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="text-xs text-gray-500 mb-4 p-2 bg-gray-50 border border-black">
+              <p className="font-bold mb-1">TEST SCENARIOS:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>Team A winning (blue banner)</li>
+                <li>Team B winning (red banner)</li>
+                <li>Tie scenario (gray banner)</li>
+              </ul>
+        </div>
+
+            <button 
+              onClick={() => {
+                setShowWinnerTest(false);
+                track('admin_test_winner', { action: 'close' });
+              }}
+              className="w-full bg-black text-white border-2 border-black py-2 font-bold hover:bg-gray-800 active:bg-gray-900"
+            >
+              CLOSE
+            </button>
+          </div>
+          </div>
+        )}
 
       {/* Random Vote Modal */}
       {showRandomModal && (
@@ -418,18 +619,18 @@ export default function CounterGame() {
                   <span>CNTR_0{vote.counterId}</span>
                   <span className={`font-black ${vote.delta > 0 ? 'text-blue-600' : 'text-red-600'}`}>
                     {vote.delta > 0 ? '+1 UP' : '-1 DOWN'}
-                  </span>
-                </div>
+          </span>
+        </div>
               ))}
             </div>
             <div className="flex gap-2">
-              <button 
+              <button
                 onClick={() => setShowRandomModal(false)}
                 className="flex-1 border-2 border-black py-2 font-bold hover:bg-gray-200 active:bg-gray-300"
               >
                 DECLINE
               </button>
-              <button 
+              <button
                 onClick={confirmRandomVotes}
                 className="flex-1 bg-black text-white border-2 border-black py-2 font-bold hover:bg-gray-800 active:bg-gray-900"
               >
@@ -458,15 +659,18 @@ export default function CounterGame() {
               className="group w-10 h-10 flex items-center justify-center border-2 border-black bg-purple-200 hover:bg-purple-100 font-bold hover:translate-x-[1px] hover:translate-y-[1px] active:bg-purple-300 active:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed text-black"
             >
               <DiceIcon className="transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:[transform:perspective(500px)_rotate3d(1,1,0,45deg)_scale(1.1)]" />
-            </button>
+              </button>
             <button 
-              onClick={() => setShowHelp(!showHelp)}
+              onClick={() => {
+                setShowHelp(!showHelp);
+                track('help_toggle', { open: (!showHelp).toString() });
+              }}
               title="Help"
               className="w-10 h-10 flex items-center justify-center border-2 border-black bg-gray-200 hover:bg-white font-bold hover:translate-x-[1px] hover:translate-y-[1px] active:bg-black active:text-white transition-all text-xl"
             >
               ?
             </button>
-          </div>
+            </div>
         </div>
 
         {/* Help Panel */}
@@ -491,21 +695,55 @@ export default function CounterGame() {
         {/* Minimal Scoreboard */}
         <div className="bg-gray-100 border-2 border-black p-4 mb-8 text-center relative">
           {/* The Bar */}
-          <div className="h-6 w-full bg-gray-300 border-2 border-black relative mb-4 flex items-center overflow-hidden">
-            {/* Center Line */}
-            <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-black/20 z-0"></div>
+          <div className="relative mb-4">
+            {/* Team Labels */}
+            <div className="flex justify-between items-center mb-1 text-xs font-black uppercase">
+              <span className="text-blue-600">TEAM A</span>
+              <span className="text-red-600">TEAM B</span>
+            </div>
             
-            {/* Moving Indicator */}
-            <div 
-              className="absolute top-0 bottom-0 w-2 bg-black border-x border-white z-10 transition-all duration-500 ease-out"
-              style={{ left: `${indicatorPosition}%` }}
-            ></div>
+            <div className="h-6 w-full bg-gray-300 border-2 border-black relative flex items-center overflow-hidden">
+              {/* Center Line */}
+              <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-black/20 z-0"></div>
+              
+              {/* Moving Indicator */}
+              <div 
+                className="absolute top-0 bottom-0 w-2 bg-black border-x border-white z-10 transition-all duration-500 ease-out"
+                style={{ left: `${indicatorPosition}%` }}
+              ></div>
 
-            {/* Fill Color */}
-            <div 
-              className={`absolute top-0 bottom-0 transition-all duration-500 ease-out ${teamScore > 0 ? 'bg-blue-200 left-1/2' : 'bg-red-200 right-1/2'}`}
-              style={{ width: `${Math.min(Math.abs(rawPercentage - 50), 50)}%` }}
-            ></div>
+              {/* Fill Color */}
+              <div 
+                className={`absolute top-0 bottom-0 transition-all duration-500 ease-out ${teamScore > 0 ? 'bg-blue-200 left-1/2' : 'bg-red-200 right-1/2'}`}
+                style={{ width: `${Math.min(Math.abs(rawPercentage - 50), 50)}%` }}
+              ></div>
+              
+              {/* Winning Indicator */}
+              {winningTeam !== 'TIE' && (
+                <div 
+                  className={`absolute top-0 -mt-8 left-1/2 transform -translate-x-1/2 z-20 px-2 py-1 border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] text-xs font-black uppercase transition-all duration-500 ease-out ${
+                    winningTeam === 'A' 
+                      ? 'bg-blue-600 text-white' 
+                      : 'bg-red-600 text-white'
+                  }`}
+                  style={{ left: `${indicatorPosition}%`, transform: `translate(-50%, 0)` }}
+                >
+                  WINNING: TEAM {winningTeam}
+                </div>
+              )}
+            </div>
+          </div>
+          
+          {/* Team Score Indicators */}
+          <div className="flex justify-center items-center gap-6 mb-4 text-sm font-bold">
+            <div className="flex flex-col items-center">
+              <span className="text-blue-600 uppercase text-xs mb-1">TEAM A</span>
+              <span className="text-blue-600 text-lg">+{teamAScore}</span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-red-600 uppercase text-xs mb-1">TEAM B</span>
+              <span className="text-red-600 text-lg">-{teamBScore}</span>
+            </div>
           </div>
           
           {/* Main Score Display */}
@@ -535,7 +773,7 @@ export default function CounterGame() {
             )}
           </span>
           <span className={ablyConnected ? 'text-green-600' : 'text-red-500 blink'}>{ablyConnected ? '● LIVE' : '○ OFFLINE'}</span>
-        </div>
+      </div>
 
         {/* Counters Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
@@ -563,7 +801,7 @@ export default function CounterGame() {
                     >
                       [+] UP
                     </button>
-                  </div>
+            </div>
                 ) : (
                   <>
                     {/* Team A View */}
@@ -589,16 +827,16 @@ export default function CounterGame() {
                     {/* Team B View */}
                     {isTeamB && (
                       <>
-                        <button
+              <button
                           onClick={() => handleClick(id as 1|2|3, -1)}
-                          disabled={isDisabled}
+                disabled={isDisabled}
                           className="w-full bg-red-600 text-white border-2 border-black hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:bg-gray-400 disabled:cursor-not-allowed py-3 text-sm font-bold transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[2px] active:translate-y-[2px]"
                         >
                           [-] VOTE DOWN
-                        </button>
-                        <button
+              </button>
+              <button
                           onClick={() => handleClick(id as 1|2|3, 1)}
-                          disabled={isDisabled}
+                disabled={isDisabled}
                           className="w-full bg-blue-100 border-2 border-black hover:bg-blue-200 active:bg-blue-300 disabled:opacity-50 disabled:bg-gray-100 disabled:cursor-not-allowed py-1 text-[10px] font-bold text-blue-900 transition-colors uppercase tracking-wider shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[1px] active:translate-y-[1px]"
                         >
                           [+] VOTE UP (TRAITOR)
@@ -612,21 +850,97 @@ export default function CounterGame() {
           ))}
         </div>
 
-        {/* Local Session Log */}
-        <div className="border-2 border-black p-2 bg-white text-xs h-32 overflow-y-auto font-mono">
-          <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold">:: LOCAL_SESSION_LOG ::</div>
-          {voteHistory.length === 0 ? (
-            <div className="text-gray-400 italic text-center mt-8">NO_ACTIVITY_YET...</div>
-          ) : (
-            <ul className="space-y-1">
-              {voteHistory.map((log) => (
-                <li key={log.id} className="flex justify-between border-b border-gray-100 pb-1">
-                  <span>&gt; VOTED {log.delta > 0 ? '+' : ''}{log.delta} ON CNTR_0{log.counterId}</span>
-                  <span className="text-gray-400">{log.timestamp}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+        {/* Statistics */}
+        <div className="border-2 border-black p-3 bg-gray-50 mb-4 text-xs font-mono">
+          <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold">:: STATISTICS ::</div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="text-center">
+              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL VOTES</div>
+              <div className="text-lg font-black">{stats.totalVotes}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL USERS</div>
+              <div className="text-lg font-black">{stats.totalUsers}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-blue-600 text-[10px] uppercase mb-1">TEAM A USERS</div>
+              <div className="text-lg font-black text-blue-600">{stats.teamAUsers}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-red-600 text-[10px] uppercase mb-1">TEAM B USERS</div>
+              <div className="text-lg font-black text-red-600">{stats.teamBUsers}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tabbed Session Log */}
+        <div className="border-2 border-black bg-white font-mono">
+          {/* Tabs */}
+          <div className="flex border-b-2 border-black">
+            <button
+              onClick={() => {
+                setActiveLogTab('local');
+                track('log_tab_switch', { tab: 'local' });
+              }}
+              className={`flex-1 px-3 py-2 text-xs font-bold border-r-2 border-black transition-colors ${
+                activeLogTab === 'local'
+                  ? 'bg-black text-white'
+                  : 'bg-gray-100 hover:bg-gray-200'
+              }`}
+            >
+              LOCAL
+            </button>
+            <button
+              onClick={() => {
+                setActiveLogTab('global');
+                track('log_tab_switch', { tab: 'global' });
+              }}
+              className={`flex-1 px-3 py-2 text-xs font-bold transition-colors ${
+                activeLogTab === 'global'
+                  ? 'bg-black text-white'
+                  : 'bg-gray-100 hover:bg-gray-200'
+              }`}
+            >
+              GLOBAL
+            </button>
+          </div>
+          
+          {/* Tab Content */}
+          <div className="p-2 text-xs h-32 overflow-y-auto">
+            {activeLogTab === 'local' ? (
+              <>
+                <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold text-[10px]">:: LOCAL_SESSION_LOG ::</div>
+                {voteHistory.length === 0 ? (
+                  <div className="text-gray-400 italic text-center mt-8">NO_ACTIVITY_YET...</div>
+                ) : (
+                  <ul className="space-y-1">
+                    {voteHistory.map((log) => (
+                      <li key={log.id} className="flex justify-between border-b border-gray-100 pb-1">
+                        <span>&gt; VOTED {log.delta > 0 ? '+' : ''}{log.delta} ON CNTR_0{log.counterId}</span>
+                        <span className="text-gray-400">{log.timestamp}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold text-[10px]">:: GLOBAL_SESSION_LOG ::</div>
+                {lastGlobalVote ? (
+                  <div className="flex justify-between items-center border-b border-gray-100 pb-1">
+                    <span>
+                      &gt; <span className={`font-bold ${lastGlobalVote.team === 'A' ? 'text-blue-600' : 'text-red-600'}`}>TEAM {lastGlobalVote.team}</span> VOTED {lastGlobalVote.delta > 0 ? '+' : ''}{lastGlobalVote.delta} ON CNTR_0{lastGlobalVote.counterId}
+                    </span>
+                    <span className="text-gray-400">
+                      {new Date(lastGlobalVote.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-gray-400 italic text-center mt-8">NO_GLOBAL_ACTIVITY_YET...</div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* Admin Footer */}
@@ -653,10 +967,19 @@ export default function CounterGame() {
             <div className="flex gap-2 text-xs">
               <button onClick={() => handleReset('counters')} className="text-red-500 hover:underline">[RST_CNTRS]</button>
               <button onClick={() => handleReset('all')} className="text-red-600 font-bold hover:underline">[HARD_RESET]</button>
+              <button 
+                onClick={() => {
+                  setShowWinnerTest(true);
+                  track('admin_test_winner', { action: 'open' });
+                }} 
+                className="text-purple-600 hover:underline"
+              >
+                [TEST WINNER]
+              </button>
               <button onClick={handleAdminLogout} className="text-gray-600 hover:underline">[LOGOUT]</button>
             </div>
           )}
-        </div>
+      </div>
 
       </div>
     </div>
