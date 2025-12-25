@@ -102,11 +102,15 @@ export async function POST(request: NextRequest) {
         try {
           const channel = ably.channels.get(CHANNEL_NAME);
           const [counter1, counter2, counter3] = await Promise.all([
-            redis.get<number>('counter:1:value') ?? 0,
-            redis.get<number>('counter:2:value') ?? 0,
-            redis.get<number>('counter:3:value') ?? 0,
+            redis.get<number>('counter:1:value'),
+            redis.get<number>('counter:2:value'),
+            redis.get<number>('counter:3:value'),
           ]);
-          const counters: [number, number, number] = [counter1, counter2, counter3];
+          const counters: [number, number, number] = [
+            counter1 ?? 0,
+            counter2 ?? 0,
+            counter3 ?? 0,
+          ];
           const teamScore = counters[0] + counters[1] + counters[2];
           
           await channel.publish('update', {
