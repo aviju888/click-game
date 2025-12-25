@@ -727,7 +727,7 @@ export default function CounterGame() {
     });
 
     if (failCount === 0) {
-      setSuccessMessage('RANDOM CHAOS UNLEASHED');
+      setSuccessMessage('RANDOM VOTES UNLEASHED');
     } else if (successCount > 0) {
       setErrorMessage(`PARTIAL SUCCESS: ${successCount}/3 VOTES`);
     } else {
@@ -856,10 +856,11 @@ export default function CounterGame() {
                   <li><span className="text-blue-600 font-bold">TEAM A</span> pushes numbers <span className="text-blue-600 font-bold">UP (+)</span></li>
                   <li><span className="text-red-600 font-bold">TEAM B</span> pushes numbers <span className="text-red-600 font-bold">DOWN (-)</span></li>
                   <li>You get <span className="font-bold">3 VOTES</span> per day (resets at UTC midnight)</li>
-                  <li>Click the <span className="font-bold">[+]</span> or <span className="font-bold">[-]</span> buttons to vote on counters</li>
+                  <li>There are <span className="font-bold">3 COUNTERS</span> - vote on any of them with your 3 votes</li>
+                  <li>The <span className="font-bold">MAIN SCORE</span> is the sum of all 3 counters - this determines the winner</li>
+                  <li>Strategy: Focus on one counter to win it, or spread votes across all counters for overall score</li>
                   <li>Use the <span className="font-bold">TRAITOR</span> button to sabotage your own team</li>
-                  <li>Use the <span className="font-bold">DICE</span> button to randomize all 3 votes (Chaos Mode)</li>
-                  <li>Watch the tug-of-war bar to see who's winning!</li>
+                  <li>Use the <span className="font-bold">DICE</span> button to randomize all 3 votes (Random Mode)</li>
                   <li>Winner is declared daily at UTC Midnight</li>
                 </ul>
               </div>
@@ -889,7 +890,7 @@ export default function CounterGame() {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white border-4 border-black p-6 w-full max-w-sm shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] animate-scale-in">
             <h3 className="text-xl font-black uppercase mb-4 text-center border-b-2 border-black pb-2">
-              CONFIRM CHAOS?
+              CONFIRM RANDOM?
             </h3>
             <div className="space-y-3 mb-6">
               {pendingRandomVotes.map((vote, i) => (
@@ -926,7 +927,7 @@ export default function CounterGame() {
         {/* Minimal Header */}
         <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-4">
           <div className="flex flex-col">
-            <h1 className="text-3xl font-black uppercase tracking-tight leading-none">Click.</h1>
+            <h1 className="text-3xl font-black uppercase tracking-tight leading-none">CLICK.</h1>
             <span className="text-[10px] text-gray-500 font-bold mt-1">DAILY BATTLE ENDS IN: {timeUntilReset}</span>
           </div>
           
@@ -962,7 +963,7 @@ export default function CounterGame() {
               <li><span className="text-red-600 font-bold">TEAM B</span> pushes numbers <span className="text-red-600 font-bold">DOWN (-)</span>.</li>
               <li>You get <span className="font-bold">3 VOTES</span> per day.</li>
               <li>Use the Traitor button below to sabotage your own team.</li>
-              <li>Use the Dice button to randomize all 3 votes (Chaos Mode).</li>
+              <li>Use the Dice button to randomize all 3 votes (Random Mode).</li>
               <li>Winner is declared daily at UTC Midnight.</li>
             </ul>
             <p className="text-xs text-gray-500 border-t border-black/20 pt-2">
@@ -1158,11 +1159,24 @@ export default function CounterGame() {
 
         {/* Counters Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-          {[1, 2, 3].map((id) => (
-            <div key={id} className="bg-white border-2 border-black p-3 flex flex-col items-center shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)]">
+          {[1, 2, 3].map((id) => {
+            const counterValue = counters[id - 1];
+            const isTeamAWinning = counterValue > 0;
+            const isTeamBWinning = counterValue < 0;
+            const isTie = counterValue === 0;
+            
+            // Determine border color
+            const borderColor = isTeamAWinning ? 'border-blue-600' : isTeamBWinning ? 'border-red-600' : 'border-black';
+            // Determine background color
+            const bgColor = isTeamAWinning ? 'bg-blue-50' : isTeamBWinning ? 'bg-red-50' : 'bg-gray-50';
+            // Determine text color
+            const textColor = isTeamAWinning ? 'text-blue-600' : isTeamBWinning ? 'text-red-600' : 'text-gray-800';
+            
+            return (
+            <div key={id} className={`bg-white border-2 ${borderColor} p-3 flex flex-col items-center shadow-[4px_4px_0px_0px_rgba(0,0,0,0.1)] transition-colors duration-300`}>
               <span className="text-xs font-bold text-gray-400 mb-2">CNTR_0{id}</span>
-              <div className="w-full bg-gray-50 border-2 border-black py-4 mb-3 flex justify-center shadow-inner">
-                <span className="text-3xl font-bold">{counters[id - 1]}</span>
+              <div className={`w-full ${bgColor} border-2 ${borderColor} py-4 mb-3 flex justify-center shadow-inner transition-colors duration-300`}>
+                <span className={`text-3xl font-bold ${textColor}`}>{counterValue}</span>
               </div>
               <div className="flex flex-col gap-2 w-full">
                 {/* Admin View */}
@@ -1226,9 +1240,10 @@ export default function CounterGame() {
                     )}
                   </>
                 )}
+              </div>
             </div>
-          </div>
-        ))}
+            );
+          })}
       </div>
 
         {/* Admin Statistics Panel */}

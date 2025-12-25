@@ -4,7 +4,7 @@ import { Analytics } from '@vercel/analytics/react';
 import { SpeedInsights } from '@vercel/speed-insights/next';
 
 export const metadata: Metadata = {
-  title: 'Global Counter Click Game',
+  title: 'CLICK.',
   description: 'A real-time global counter click game with team competition',
 };
 
