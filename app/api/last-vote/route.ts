@@ -9,17 +9,22 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ lastVote: null });
     }
 
-    const lastVote = JSON.parse(lastVoteJson);
-    
-    // Return only vote info - NO IP, NO client ID
-    return NextResponse.json({
-      lastVote: {
-        counterId: lastVote.counterId,
-        delta: lastVote.delta,
-        team: lastVote.team,
-        timestamp: lastVote.timestamp,
-      },
-    });
+    try {
+      const lastVote = JSON.parse(lastVoteJson);
+      
+      // Return only vote info - NO IP, NO client ID
+      return NextResponse.json({
+        lastVote: {
+          counterId: lastVote.counterId,
+          delta: lastVote.delta,
+          team: lastVote.team,
+          timestamp: lastVote.timestamp,
+        },
+      });
+    } catch (parseError) {
+      // Invalid JSON - return null instead of error
+      return NextResponse.json({ lastVote: null });
+    }
   } catch (error) {
     // Error logging without any user data
     console.error('Error fetching last vote');

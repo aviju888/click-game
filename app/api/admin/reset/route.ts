@@ -75,12 +75,62 @@ export async function POST(request: NextRequest) {
     }
 
     if (type === 'votes') {
-      // Note: Upstash Redis REST API doesn't support KEYS command
-      // Individual vote resets would require tracking all client IDs
-      // Votes reset automatically at UTC midnight anyway
+      // Reset all vote limits for today (give everyone their 3 votes back)
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      try {
+        // Get all client IDs that have voted today
+        const voterSetKey = `voters:${today}`;
+        const clientIds = await redis.smembers<string[]>(voterSetKey) ?? [];
+        
+        // Delete vote counts for all clients in the set
+        const deletePromises: Promise<number>[] = [];
+        if (clientIds.length > 0) {
+          clientIds.forEach(clientId => {
+            deletePromises.push(redis.del(`votes:${clientId}:${today}`));
+          });
+          await Promise.all(deletePromises);
+        }
+        
+        // Clear the voters set (this ensures no one is tracked as having voted)
+        await redis.del(voterSetKey);
+        
+        // Wait a moment to ensure Redis operations complete and propagate
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Publish update to notify all clients to refresh their vote counts
+        const { ably, CHANNEL_NAME } = await import('@/lib/ably');
+        try {
+          const channel = ably.channels.get(CHANNEL_NAME);
+          const [counter1, counter2, counter3] = await Promise.all([
+            redis.get<number>('counter:1:value') ?? 0,
+            redis.get<number>('counter:2:value') ?? 0,
+            redis.get<number>('counter:3:value') ?? 0,
+          ]);
+          const counters: [number, number, number] = [counter1, counter2, counter3];
+          const teamScore = counters[0] + counters[1] + counters[2];
+          
+          await channel.publish('update', {
+            counters,
+            teamScore,
+            timestamp: Date.now(),
+            voteReset: true, // Signal that votes were reset
+          });
+        } catch (error) {
+          // Error logging without any user data
+          console.error('Error publishing vote reset');
+        }
+      } catch (error) {
+        // Error logging without any user data
+        console.error('Error resetting votes');
+        return NextResponse.json(
+          { error: 'Failed to reset votes' },
+          { status: 500 }
+        );
+      }
+
       return NextResponse.json({ 
         success: true, 
-        message: 'Vote reset not available. Votes reset automatically at UTC midnight.' 
+        message: 'All vote limits reset - everyone has 3 votes again' 
       });
     }
 

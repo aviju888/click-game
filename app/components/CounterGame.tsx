@@ -76,18 +76,58 @@ export default function CounterGame() {
     teamBUsers: 0,
   });
   
+  // Online Count State
+  const [onlineCount, setOnlineCount] = useState(0);
+  
+  // Admin Stats State
+  const [adminStats, setAdminStats] = useState({
+    onlineCount: 0,
+    onlineTeamA: 0,
+    onlineTeamB: 0,
+    votesTodayTeamA: 0,
+    votesTodayTeamB: 0,
+    votesAllTimeTeamA: 0,
+    votesAllTimeTeamB: 0,
+    voteRate: 0, // votes per minute
+  });
+  
   // Random Vote State
   const [showRandomModal, setShowRandomModal] = useState(false);
   const [pendingRandomVotes, setPendingRandomVotes] = useState<PendingVote[]>([]);
   
   // Loading State
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  // Refresh cooldown state
+  const [refreshClickCount, setRefreshClickCount] = useState(0);
+  const [lastRefreshTime, setLastRefreshTime] = useState(0);
+  const [cooldownUntil, setCooldownUntil] = useState(0);
   
   // Admin State
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [showWinnerTest, setShowWinnerTest] = useState(false);
+
+  // Cooldown countdown timer - force re-render every second during cooldown
+  const [cooldownDisplay, setCooldownDisplay] = useState(0);
+  useEffect(() => {
+    if (cooldownUntil > Date.now()) {
+      const interval = setInterval(() => {
+        const remaining = Math.ceil((cooldownUntil - Date.now()) / 1000);
+        setCooldownDisplay(remaining);
+        if (Date.now() >= cooldownUntil) {
+          setCooldownUntil(0);
+          setRefreshClickCount(0);
+          setCooldownDisplay(0);
+        }
+      }, 100);
+      return () => clearInterval(interval);
+    } else {
+      setCooldownDisplay(0);
+    }
+  }, [cooldownUntil]);
 
   // Countdown Timer Logic
   useEffect(() => {
@@ -141,7 +181,8 @@ export default function CounterGame() {
   // Fetch initial data
   const fetchCounters = useCallback(async () => {
     try {
-      const response = await fetch('/api/counters');
+      // Add cache busting to ensure fresh data after vote reset
+      const response = await fetch(`/api/counters?t=${Date.now()}`);
       if (!response.ok) {
         throw new Error('Failed to fetch counters');
       }
@@ -184,21 +225,75 @@ export default function CounterGame() {
           },
         });
 
-        ablyClient.connection.on('connected', () => setAblyConnected(true));
-        ablyClient.connection.on('disconnected', () => setAblyConnected(false));
+        ablyClient.connection.on('connected', () => {
+          setAblyConnected(true);
+        });
+        ablyClient.connection.on('disconnected', () => {
+          setAblyConnected(false);
+          setOnlineCount(0);
+        });
 
         channel = ablyClient.channels.get('global-counter');
+        
+        // Subscribe to counter updates
         channel.subscribe('update', (message: any) => {
           const data = message.data;
           if (data) {
-            setCounters(data.counters);
-            setTeamScore(data.teamScore);
+          setCounters(data.counters);
+          setTeamScore(data.teamScore);
             // Update last global vote if included in message
             if (data.lastVote) {
               setLastGlobalVote(data.lastVote);
             }
+            // If vote reset signal, refresh vote counts
+            if (data.voteReset) {
+              fetchCounters();
+            }
           }
         });
+        
+        // Subscribe to presence events for online count
+        const updateOnlineCount = async () => {
+          try {
+            const members = await channel.presence.get();
+            const total = members.length;
+            const teamA = members.filter((m: any) => m.data?.team === 'A').length;
+            const teamB = members.filter((m: any) => m.data?.team === 'B').length;
+            setOnlineCount(total);
+            // Update admin stats if admin
+            setAdminStats(prev => ({
+              ...prev,
+              onlineCount: total,
+              onlineTeamA: teamA,
+              onlineTeamB: teamB,
+            }));
+          } catch (error) {
+            // Silently fail
+          }
+        };
+        
+        channel.presence.subscribe(['enter', 'leave', 'update'], () => {
+          updateOnlineCount();
+        });
+        
+        // Get initial presence count after connection
+        ablyClient.connection.once('connected', async () => {
+          if (userTeam && channel) {
+            await channel.presence.enter({ team: userTeam });
+          }
+          updateOnlineCount();
+        });
+        
+        // Also try to get initial count if already connected
+        if (ablyClient.connection.state === 'connected') {
+          if (userTeam) {
+            channel.presence.enter({ team: userTeam }).then(() => {
+              updateOnlineCount();
+            });
+          } else {
+            updateOnlineCount();
+          }
+        }
       } catch (error) {
         console.error('Error initializing Ably:', error);
         setAblyConnected(false);
@@ -238,15 +333,50 @@ export default function CounterGame() {
     fetchLastVote();
     fetchStats();
     
+    // Fetch admin stats function
+    const fetchAdminStats = async () => {
+      if (!isAdmin) return;
+      try {
+        const response = await fetch('/api/admin/stats');
+        if (response.ok) {
+          const data = await response.json();
+          // Merge with existing online counts (from presence)
+          setAdminStats(prev => ({
+            ...prev,
+            ...data,
+            // Preserve online counts from presence
+            onlineCount: prev.onlineCount,
+            onlineTeamA: prev.onlineTeamA,
+            onlineTeamB: prev.onlineTeamB,
+          }));
+        }
+      } catch (error) {
+        // Silently fail
+      }
+    };
+    
+    // Fetch admin stats if admin
+    if (isAdmin) {
+      fetchAdminStats();
+    }
+    
     // Refresh stats periodically
-    const statsInterval = setInterval(fetchStats, 10000); // Every 10 seconds
+    const statsInterval = setInterval(() => {
+      fetchStats();
+      if (isAdmin) {
+        fetchAdminStats();
+      }
+    }, 5000); // Every 5 seconds
 
     return () => {
       clearInterval(statsInterval);
-      channel?.unsubscribe();
+      if (channel) {
+        channel.presence.leave().catch(() => {});
+        channel.unsubscribe();
+      }
       ablyClient?.close();
     };
-  }, [fetchCounters, checkAdminStatus]);
+  }, [fetchCounters, checkAdminStatus, userTeam, isAdmin]);
 
   // Actions
   const handleAdminLogin = async () => {
@@ -263,6 +393,25 @@ export default function CounterGame() {
         setAdminPassword('');
         setVotesRemaining(999);
         setSuccessMessage('ADMIN ACCESS GRANTED');
+        
+        // Fetch admin stats immediately
+        try {
+          const statsResponse = await fetch('/api/admin/stats');
+          if (statsResponse.ok) {
+            const statsData = await statsResponse.json();
+            // Merge with existing online counts (from presence)
+            setAdminStats(prev => ({
+              ...prev,
+              ...statsData,
+              // Preserve online counts from presence
+              onlineCount: prev.onlineCount,
+              onlineTeamA: prev.onlineTeamA,
+              onlineTeamB: prev.onlineTeamB,
+            }));
+          }
+        } catch (error) {
+          // Silently fail
+        }
       } else {
         setErrorMessage('ACCESS DENIED');
       }
@@ -305,7 +454,15 @@ export default function CounterGame() {
       });
       if (response.ok) {
         setSuccessMessage(`${type.toUpperCase()} RESET SUCCESSFUL`);
-        fetchCounters();
+        // Force refresh vote counts immediately
+        if (type === 'votes' || type === 'all') {
+          // Small delay to ensure Redis deletion is complete
+          setTimeout(() => {
+            fetchCounters();
+          }, 100);
+        } else {
+          fetchCounters();
+        }
         
         // Track admin reset
         track('admin_reset', { type });
@@ -314,8 +471,8 @@ export default function CounterGame() {
         const fetchStats = async () => {
           try {
             const response = await fetch('/api/stats');
-            if (response.ok) {
-              const data = await response.json();
+      if (response.ok) {
+        const data = await response.json();
               setStats(data);
             }
           } catch (error) {
@@ -592,7 +749,7 @@ export default function CounterGame() {
               </ul>
         </div>
 
-            <button 
+            <button
               onClick={() => {
                 setShowWinnerTest(false);
                 track('admin_test_winner', { action: 'close' });
@@ -600,8 +757,8 @@ export default function CounterGame() {
               className="w-full bg-black text-white border-2 border-black py-2 font-bold hover:bg-gray-800 active:bg-gray-900"
             >
               CLOSE
-            </button>
-          </div>
+                </button>
+              </div>
           </div>
         )}
 
@@ -652,7 +809,7 @@ export default function CounterGame() {
           </div>
           
           <div className="flex gap-2">
-            <button 
+              <button
               onClick={generateRandomVotes}
               disabled={isDisabled || isSubmitting || (!isAdmin && votesRemaining < 3)}
               title="Randomize My Votes"
@@ -669,7 +826,7 @@ export default function CounterGame() {
               className="w-10 h-10 flex items-center justify-center border-2 border-black bg-gray-200 hover:bg-white font-bold hover:translate-x-[1px] hover:translate-y-[1px] active:bg-black active:text-white transition-all text-xl"
             >
               ?
-            </button>
+              </button>
             </div>
         </div>
 
@@ -686,8 +843,8 @@ export default function CounterGame() {
               <li>Use the Dice button to randomize all 3 votes (Chaos Mode).</li>
               <li>Winner is declared daily at UTC Midnight.</li>
             </ul>
-            <p className="text-xs text-gray-500 border-t border-black/20 pt-2 italic">
-              "i made this game for fun - adriel v."
+            <p className="text-xs text-gray-500 border-t border-black/20 pt-2">
+              Made For Fun by <a href="https://www.linkedin.com/in/adriel-vijuan/" target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-700">Adriel V.</a>
             </p>
           </div>
         )}
@@ -696,26 +853,32 @@ export default function CounterGame() {
         <div className="bg-gray-100 border-2 border-black p-4 mb-8 text-center relative">
           {/* The Bar */}
           <div className="relative mb-4">
-            {/* Team Labels */}
-            <div className="flex justify-between items-center mb-1 text-xs font-black uppercase">
-              <span className="text-blue-600">TEAM A</span>
-              <span className="text-red-600">TEAM B</span>
+            {/* Team Labels with Scores */}
+            <div className="flex justify-between items-start mb-1">
+              <div className="flex flex-col items-start">
+                <span className="text-blue-600 text-xs font-black uppercase">TEAM A</span>
+                <span className="text-blue-600 text-lg font-bold">+{teamAScore}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-red-600 text-xs font-black uppercase">TEAM B</span>
+                <span className="text-red-600 text-lg font-bold">-{teamBScore}</span>
+              </div>
             </div>
             
-            <div className="h-6 w-full bg-gray-300 border-2 border-black relative flex items-center overflow-hidden">
+            <div className="h-6 w-full border-2 border-black relative flex items-center overflow-hidden">
+              {/* Team A Side (Blue) - Left Half */}
+              <div className="absolute left-0 top-0 bottom-0 w-1/2 bg-blue-300 z-0"></div>
+              
+              {/* Team B Side (Red) - Right Half */}
+              <div className="absolute right-0 top-0 bottom-0 w-1/2 bg-red-300 z-0"></div>
+              
               {/* Center Line */}
-              <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-black/20 z-0"></div>
+              <div className="absolute left-1/2 top-0 bottom-0 w-0.5 bg-black/40 z-0"></div>
               
               {/* Moving Indicator */}
               <div 
                 className="absolute top-0 bottom-0 w-2 bg-black border-x border-white z-10 transition-all duration-500 ease-out"
                 style={{ left: `${indicatorPosition}%` }}
-              ></div>
-
-              {/* Fill Color */}
-              <div 
-                className={`absolute top-0 bottom-0 transition-all duration-500 ease-out ${teamScore > 0 ? 'bg-blue-200 left-1/2' : 'bg-red-200 right-1/2'}`}
-                style={{ width: `${Math.min(Math.abs(rawPercentage - 50), 50)}%` }}
               ></div>
               
               {/* Winning Indicator */}
@@ -734,18 +897,6 @@ export default function CounterGame() {
             </div>
           </div>
           
-          {/* Team Score Indicators */}
-          <div className="flex justify-center items-center gap-6 mb-4 text-sm font-bold">
-            <div className="flex flex-col items-center">
-              <span className="text-blue-600 uppercase text-xs mb-1">TEAM A</span>
-              <span className="text-blue-600 text-lg">+{teamAScore}</span>
-            </div>
-            <div className="flex flex-col items-center">
-              <span className="text-red-600 uppercase text-xs mb-1">TEAM B</span>
-              <span className="text-red-600 text-lg">-{teamBScore}</span>
-            </div>
-          </div>
-          
           {/* Main Score Display */}
           <div className="flex justify-center items-center gap-4">
             <div className="bg-white border-2 border-black px-6 py-2 shadow-[2px_2px_0px_0px_rgba(0,0,0,0.2)]">
@@ -757,9 +908,12 @@ export default function CounterGame() {
 
           {/* Simplified Team Indicator */}
           <div className={`mt-4 ${isTeamA ? 'text-blue-600' : 'text-red-600'}`}>
-            <span className="font-black uppercase tracking-widest text-xl">
+            <div className="font-black uppercase tracking-widest text-xl">
               YOU ARE TEAM {userTeam || '?'}
-            </span>
+            </div>
+            <div className="text-xs font-normal mt-1 opacity-80">
+              YOUR GOAL: {userTeam === 'A' ? 'INCREASE' : userTeam === 'B' ? 'DECREASE' : '?'} THE SCORE
+            </div>
           </div>
         </div>
 
@@ -772,7 +926,112 @@ export default function CounterGame() {
               <span>VOTES_LEFT: <span className="text-green-600">{isAdmin ? '∞' : votesRemaining}/3</span></span>
             )}
           </span>
-          <span className={ablyConnected ? 'text-green-600' : 'text-red-500 blink'}>{ablyConnected ? '● LIVE' : '○ OFFLINE'}</span>
+          <div className="flex items-center gap-2">
+            <span className={ablyConnected ? 'text-green-600' : 'text-red-500 blink'}>{ablyConnected ? '● LIVE' : '○ OFFLINE'}</span>
+            <button
+              onClick={async () => {
+                if (isRefreshing) return;
+                
+                // Check cooldown
+                const now = Date.now();
+                if (now < cooldownUntil) {
+                  const remainingSeconds = Math.ceil((cooldownUntil - now) / 1000);
+                  setErrorMessage(`REFRESH COOLDOWN: ${remainingSeconds}s`);
+                  setTimeout(() => setErrorMessage(null), 2000);
+                  return;
+                }
+                
+                // Track clicks for spam detection
+                const timeSinceLastClick = now - lastRefreshTime;
+                if (timeSinceLastClick < 2000) { // Within 2 seconds
+                  const newCount = refreshClickCount + 1;
+                  setRefreshClickCount(newCount);
+                  
+                  if (newCount >= 3) {
+                    // Activate cooldown
+                    setCooldownUntil(now + 5000); // 5 second cooldown
+                    setErrorMessage('REFRESH COOLDOWN: 5s');
+                    setTimeout(() => setErrorMessage(null), 2000);
+                    return;
+                  }
+                } else {
+                  // Reset counter if enough time has passed
+                  setRefreshClickCount(1);
+                }
+                
+                setLastRefreshTime(now);
+                setIsRefreshing(true);
+                try {
+                  await fetchCounters();
+                  // Refresh stats
+                  try {
+                    const response = await fetch('/api/stats');
+                    if (response.ok) {
+                      const data = await response.json();
+                      setStats(data);
+                    }
+                  } catch (error) {
+                    // Silently fail
+                  }
+                  // Refresh last vote
+                  try {
+                    const response = await fetch('/api/last-vote');
+                    if (response.ok) {
+                      const data = await response.json();
+                      setLastGlobalVote(data.lastVote);
+                    }
+                  } catch (error) {
+                    // Silently fail
+                  }
+                  // Refresh admin stats if admin
+                  if (isAdmin) {
+                    try {
+                      const response = await fetch('/api/admin/stats');
+                      if (response.ok) {
+                        const data = await response.json();
+                        setAdminStats(prev => ({
+                          ...prev,
+                          ...data,
+                          onlineCount: prev.onlineCount,
+                          onlineTeamA: prev.onlineTeamA,
+                          onlineTeamB: prev.onlineTeamB,
+                        }));
+                      }
+                    } catch (error) {
+                      // Silently fail
+                    }
+                  }
+                } finally {
+                  setIsRefreshing(false);
+                }
+              }}
+              disabled={isRefreshing || Date.now() < cooldownUntil}
+              className="border-2 border-black px-3 py-1 text-xs font-bold bg-white hover:bg-black hover:text-white active:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[2px] active:translate-y-[2px]"
+              title="Refresh data"
+            >
+              {isRefreshing ? (
+                <>
+                  <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span>REFRESHING...</span>
+                </>
+              ) : cooldownDisplay > 0 ? (
+                <>
+                  <span className="text-red-600">⏱</span>
+                  <span>COOLDOWN: {cooldownDisplay}s</span>
+                </>
+              ) : (
+                <>
+                  <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  <span>REFRESH</span>
+                </>
+              )}
+            </button>
+          </div>
       </div>
 
         {/* Counters Grid */}
@@ -850,28 +1109,48 @@ export default function CounterGame() {
           ))}
         </div>
 
-        {/* Statistics */}
-        <div className="border-2 border-black p-3 bg-gray-50 mb-4 text-xs font-mono">
-          <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold">:: STATISTICS ::</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="text-center">
-              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL VOTES</div>
-              <div className="text-lg font-black">{stats.totalVotes}</div>
+        {/* Admin Statistics Panel */}
+        {isAdmin && (
+          <div className="border-2 border-black p-3 bg-yellow-50 mb-4 text-xs font-mono border-dashed">
+            <div className="border-b border-black/10 mb-2 pb-1 text-yellow-700 font-bold">:: ADMIN STATISTICS ::</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+              <div className="text-center">
+                <div className="text-gray-500 text-[10px] uppercase mb-1">ONLINE NOW</div>
+                <div className="text-lg font-black">{adminStats.onlineCount}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-blue-600 text-[10px] uppercase mb-1">ONLINE TEAM A</div>
+                <div className="text-lg font-black text-blue-600">{adminStats.onlineTeamA}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-red-600 text-[10px] uppercase mb-1">ONLINE TEAM B</div>
+                <div className="text-lg font-black text-red-600">{adminStats.onlineTeamB}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-gray-500 text-[10px] uppercase mb-1">VOTE RATE/MIN</div>
+                <div className="text-lg font-black">{adminStats.voteRate.toFixed(1)}</div>
+              </div>
             </div>
-            <div className="text-center">
-              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL USERS</div>
-              <div className="text-lg font-black">{stats.totalUsers}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-blue-600 text-[10px] uppercase mb-1">TEAM A USERS</div>
-              <div className="text-lg font-black text-blue-600">{stats.teamAUsers}</div>
-            </div>
-            <div className="text-center">
-              <div className="text-red-600 text-[10px] uppercase mb-1">TEAM B USERS</div>
-              <div className="text-lg font-black text-red-600">{stats.teamBUsers}</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="text-center">
+                <div className="text-blue-600 text-[10px] uppercase mb-1">VOTES TODAY (A)</div>
+                <div className="text-lg font-black text-blue-600">{adminStats.votesTodayTeamA}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-red-600 text-[10px] uppercase mb-1">VOTES TODAY (B)</div>
+                <div className="text-lg font-black text-red-600">{adminStats.votesTodayTeamB}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-blue-600 text-[10px] uppercase mb-1">VOTES ALL TIME (A)</div>
+                <div className="text-lg font-black text-blue-600">{adminStats.votesAllTimeTeamA}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-red-600 text-[10px] uppercase mb-1">VOTES ALL TIME (B)</div>
+                <div className="text-lg font-black text-red-600">{adminStats.votesAllTimeTeamB}</div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Tabbed Session Log */}
         <div className="border-2 border-black bg-white font-mono">
@@ -943,6 +1222,33 @@ export default function CounterGame() {
           </div>
         </div>
 
+        {/* Statistics */}
+        <div className="border-2 border-black p-3 bg-gray-50 mb-4 text-xs font-mono">
+          <div className="border-b border-black/10 mb-2 pb-1 text-gray-400 font-bold">:: STATISTICS ::</div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="text-center">
+              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL VOTES</div>
+              <div className="text-lg font-black">{stats.totalVotes}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-gray-500 text-[10px] uppercase mb-1">TOTAL USERS</div>
+              <div className="text-lg font-black">{stats.totalUsers}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-green-600 text-[10px] uppercase mb-1">ONLINE NOW</div>
+              <div className="text-lg font-black text-green-600">{onlineCount}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-blue-600 text-[10px] uppercase mb-1">TEAM A USERS</div>
+              <div className="text-lg font-black text-blue-600">{stats.teamAUsers}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-red-600 text-[10px] uppercase mb-1">TEAM B USERS</div>
+              <div className="text-lg font-black text-red-600">{stats.teamBUsers}</div>
+            </div>
+          </div>
+        </div>
+
         {/* Admin Footer */}
         <div className="mt-4 flex justify-end">
           {!isAdmin ? (
@@ -966,6 +1272,7 @@ export default function CounterGame() {
           ) : (
             <div className="flex gap-2 text-xs">
               <button onClick={() => handleReset('counters')} className="text-red-500 hover:underline">[RST_CNTRS]</button>
+              <button onClick={() => handleReset('votes')} className="text-orange-600 hover:underline">[RST_VOTES]</button>
               <button onClick={() => handleReset('all')} className="text-red-600 font-bold hover:underline">[HARD_RESET]</button>
               <button 
                 onClick={() => {

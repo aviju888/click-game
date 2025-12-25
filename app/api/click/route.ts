@@ -127,6 +127,10 @@ export async function POST(request: NextRequest) {
     // Track total votes ever (for statistics)
     await redis.incr('stats:total-votes');
     
+    // Track votes per team (for admin stats)
+    await redis.incr(`stats:team-${team}-votes`); // All-time votes per team
+    await redis.incr(`stats:team-${team}-votes:${today}`); // Daily votes per team
+    
     // Track unique users (add to set)
     await redis.sadd('stats:all-users', clientId);
     
