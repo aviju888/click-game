@@ -254,6 +254,7 @@ export default function CounterGame() {
         
         // Subscribe to presence events for online count
         const updateOnlineCount = async () => {
+          if (!channel) return;
           try {
             const members = await channel.presence.get();
             const total = members.length;
