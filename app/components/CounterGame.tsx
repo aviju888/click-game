@@ -33,16 +33,72 @@ interface GlobalVote {
 }
 
 // Icons
-const DiceIcon = ({ className }: { className?: string }) => (
-  <svg className={className} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter">
-    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-    <circle cx="8" cy="8" r="1" fill="currentColor" stroke="none" />
-    <circle cx="16" cy="16" r="1" fill="currentColor" stroke="none" />
-    <circle cx="16" cy="8" r="1" fill="currentColor" stroke="none" />
-    <circle cx="8" cy="16" r="1" fill="currentColor" stroke="none" />
-    <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
-  </svg>
-);
+const Dice3D = () => {
+  // Simple dot component for the pip
+  const Dot = () => <div className="w-1 h-1 bg-black rounded-full" />;
+  
+  // Face component to handle positioning and borders
+  const Face = ({ transform, children }: { transform: string, children: React.ReactNode }) => (
+    <div 
+      className="absolute w-full h-full bg-white border border-black flex items-center justify-center backface-hidden"
+      style={{ transform, backfaceVisibility: 'hidden' }}
+    >
+      {children}
+    </div>
+  );
+
+  return (
+    // 'group' class added here so hovering the dice triggers the animation
+    <div className="group w-5 h-5 relative [perspective:400px]">
+      <div className="w-full h-full relative [transform-style:preserve-3d] transition-transform duration-[800ms] ease-[cubic-bezier(0.34,1.56,0.64,1)] [transform:rotateX(-25deg)_rotateY(-25deg)] group-hover:[transform:rotateX(-385deg)_rotateY(-385deg)]">
+        
+        {/* Front (1) */}
+        <Face transform="translateZ(10px)">
+          <Dot />
+        </Face>
+
+        {/* Back (6) */}
+        <Face transform="rotateY(180deg) translateZ(10px)">
+          <div className="grid grid-cols-2 gap-0.5">
+            <Dot /><Dot /><Dot /><Dot /><Dot /><Dot />
+          </div>
+        </Face>
+
+        {/* Right (2) */}
+        <Face transform="rotateY(90deg) translateZ(10px)">
+          <div className="flex gap-1 transform -rotate-45">
+            <Dot /><Dot />
+          </div>
+        </Face>
+
+        {/* Left (5) */}
+        <Face transform="rotateY(-90deg) translateZ(10px)">
+          <div className="relative w-full h-full">
+            <div className="absolute top-1 left-1"><Dot/></div>
+            <div className="absolute top-1 right-1"><Dot/></div>
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"><Dot/></div>
+            <div className="absolute bottom-1 left-1"><Dot/></div>
+            <div className="absolute bottom-1 right-1"><Dot/></div>
+          </div>
+        </Face>
+
+        {/* Top (3) */}
+        <Face transform="rotateX(90deg) translateZ(10px)">
+          <div className="flex gap-0.5 transform -rotate-45">
+            <Dot /><Dot /><Dot />
+          </div>
+        </Face>
+
+        {/* Bottom (4) */}
+        <Face transform="rotateX(-90deg) translateZ(10px)">
+          <div className="grid grid-cols-2 gap-1">
+            <Dot /><Dot /><Dot /><Dot />
+          </div>
+        </Face>
+      </div>
+    </div>
+  );
+};
 
 const CrownIcon = ({ className }: { className?: string }) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="square" strokeLinejoin="miter">
@@ -109,6 +165,9 @@ export default function CounterGame() {
   const [adminPassword, setAdminPassword] = useState('');
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [showWinnerTest, setShowWinnerTest] = useState(false);
+  
+  // Rules Popup State
+  const [showRulesPopup, setShowRulesPopup] = useState(false);
 
   // Cooldown countdown timer - force re-render every second during cooldown
   const [cooldownDisplay, setCooldownDisplay] = useState(0);
@@ -196,6 +255,14 @@ export default function CounterGame() {
         setUserTeam((prev) => prev || 'A'); // Default fallback only if not set
       }
       setIsLoading(false);
+      
+      // Check if first visit after data loads
+      if (typeof window !== 'undefined') {
+        const hasSeenRules = localStorage.getItem('hasSeenRules');
+        if (!hasSeenRules) {
+          setShowRulesPopup(true);
+        }
+      }
     } catch (error) {
       console.error('Error fetching counters:', error);
       setErrorMessage('Failed to load counters. Please refresh the page.');
@@ -372,10 +439,21 @@ export default function CounterGame() {
     return () => {
       clearInterval(statsInterval);
       if (channel) {
-        channel.presence.leave().catch(() => {});
+        try {
+          channel.presence.leave().catch(() => {});
         channel.unsubscribe();
+        } catch (error) {
+          // Silently handle cleanup errors
       }
-      ablyClient?.close();
+      }
+      if (ablyClient && ablyClient.connection.state !== 'closed') {
+        try {
+          ablyClient.connection.off();
+        ablyClient.close();
+        } catch (error) {
+          // Silently handle cleanup errors - connection may already be closed
+        }
+      }
     };
   }, [fetchCounters, checkAdminStatus, userTeam, isAdmin]);
 
@@ -409,8 +487,8 @@ export default function CounterGame() {
               onlineTeamA: prev.onlineTeamA,
               onlineTeamB: prev.onlineTeamB,
             }));
-          }
-        } catch (error) {
+      }
+    } catch (error) {
           // Silently fail
         }
       } else {
@@ -458,10 +536,10 @@ export default function CounterGame() {
         // Force refresh vote counts immediately
         if (type === 'votes' || type === 'all') {
           // Small delay to ensure Redis deletion is complete
-          setTimeout(() => {
+        setTimeout(() => {
             fetchCounters();
           }, 100);
-        } else {
+      } else {
           fetchCounters();
         }
         
@@ -475,8 +553,8 @@ export default function CounterGame() {
       if (response.ok) {
         const data = await response.json();
               setStats(data);
-            }
-          } catch (error) {
+      }
+    } catch (error) {
             // Silently fail
           }
         };
@@ -559,8 +637,8 @@ export default function CounterGame() {
           if (response.ok) {
             const data = await response.json();
             setStats(data);
-          }
-        } catch (error) {
+      }
+    } catch (error) {
           // Silently fail
         }
       };
@@ -726,8 +804,8 @@ export default function CounterGame() {
           </span>
                   </div>
                 </div>
-              </div>
-              
+        </div>
+
               {/* Test Tie Scenario */}
               <div 
                 className="w-full border-2 border-black flex items-center justify-between p-3 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] bg-gray-100 text-gray-500"
@@ -758,6 +836,49 @@ export default function CounterGame() {
               className="w-full bg-black text-white border-2 border-black py-2 font-bold hover:bg-gray-800 active:bg-gray-900"
             >
               CLOSE
+            </button>
+              </div>
+          </div>
+        )}
+
+      {/* Rules Popup Modal */}
+      {showRulesPopup && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white border-4 border-black p-6 w-full max-w-lg shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] animate-scale-in max-h-[90vh] overflow-y-auto">
+            <h3 className="text-2xl font-black uppercase mb-4 text-center border-b-4 border-black pb-3">
+              :: WELCOME ::
+            </h3>
+            <div className="space-y-4 mb-6 text-sm">
+              <div className="bg-yellow-100 border-2 border-black p-4">
+                <p className="font-bold mb-2 text-base">:: HOW TO PLAY ::</p>
+                <ul className="list-disc pl-5 space-y-2">
+                  <li>You've been assigned to a <span className="font-bold">TEAM</span> - check the top of the page!</li>
+                  <li><span className="text-blue-600 font-bold">TEAM A</span> pushes numbers <span className="text-blue-600 font-bold">UP (+)</span></li>
+                  <li><span className="text-red-600 font-bold">TEAM B</span> pushes numbers <span className="text-red-600 font-bold">DOWN (-)</span></li>
+                  <li>You get <span className="font-bold">3 VOTES</span> per day (resets at UTC midnight)</li>
+                  <li>Click the <span className="font-bold">[+]</span> or <span className="font-bold">[-]</span> buttons to vote on counters</li>
+                  <li>Use the <span className="font-bold">TRAITOR</span> button to sabotage your own team</li>
+                  <li>Use the <span className="font-bold">DICE</span> button to randomize all 3 votes (Chaos Mode)</li>
+                  <li>Watch the tug-of-war bar to see who's winning!</li>
+                  <li>Winner is declared daily at UTC Midnight</li>
+                </ul>
+              </div>
+              <div className="bg-gray-100 border-2 border-black p-3 text-xs">
+                <p className="font-bold mb-1">TIP:</p>
+                <p>Click the <span className="font-bold">?</span> button anytime to view this info again!</p>
+              </div>
+            </div>
+                <button
+              onClick={() => {
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem('hasSeenRules', 'true');
+                }
+                setShowRulesPopup(false);
+                track('rules_popup', { action: 'dismiss' });
+              }}
+              className="w-full bg-black text-white border-2 border-black py-3 font-bold hover:bg-gray-800 active:bg-gray-900 text-lg uppercase shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[4px] active:translate-y-[4px] transition-all"
+            >
+              GOT IT - START PLAYING!
                 </button>
               </div>
           </div>
@@ -778,7 +899,7 @@ export default function CounterGame() {
                   <span className={`font-black ${vote.delta > 0 ? 'text-blue-600' : 'text-red-600'}`}>
                     {vote.delta > 0 ? '+1 UP' : '-1 DOWN'}
           </span>
-        </div>
+            </div>
               ))}
             </div>
             <div className="flex gap-2">
@@ -805,7 +926,7 @@ export default function CounterGame() {
         {/* Minimal Header */}
         <div className="flex justify-between items-start border-b-2 border-black pb-4 mb-4">
           <div className="flex flex-col">
-            <h1 className="text-3xl font-black uppercase tracking-tight leading-none">CLICK_WARS</h1>
+            <h1 className="text-3xl font-black uppercase tracking-tight leading-none">Click.</h1>
             <span className="text-[10px] text-gray-500 font-bold mt-1">DAILY BATTLE ENDS IN: {timeUntilReset}</span>
           </div>
           
@@ -816,7 +937,7 @@ export default function CounterGame() {
               title="Randomize My Votes"
               className="group w-10 h-10 flex items-center justify-center border-2 border-black bg-purple-200 hover:bg-purple-100 font-bold hover:translate-x-[1px] hover:translate-y-[1px] active:bg-purple-300 active:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed text-black"
             >
-              <DiceIcon className="transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:[transform:perspective(500px)_rotate3d(1,1,0,45deg)_scale(1.1)]" />
+              <Dice3D />
               </button>
             <button 
               onClick={() => {
@@ -893,8 +1014,8 @@ export default function CounterGame() {
                   style={{ left: `${indicatorPosition}%`, transform: `translate(-50%, 0)` }}
                 >
                   WINNING: TEAM {winningTeam}
-                </div>
-              )}
+          </div>
+        )}
             </div>
           </div>
           
@@ -904,7 +1025,7 @@ export default function CounterGame() {
               <span className={`text-4xl font-black ${teamScore > 0 ? 'text-blue-600' : teamScore < 0 ? 'text-red-600' : 'text-gray-800'}`}>
                 {teamScore > 0 ? '+' : ''}{teamScore}
               </span>
-            </div>
+          </div>
           </div>
 
           {/* Simplified Team Indicator */}
@@ -1067,20 +1188,20 @@ export default function CounterGame() {
                     {/* Team A View */}
                     {isTeamA && (
                       <>
-                        <button
+              <button
                           onClick={() => handleClick(id as 1|2|3, 1)}
-                          disabled={isDisabled}
+                disabled={isDisabled}
                           className="w-full bg-blue-600 text-white border-2 border-black hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 disabled:bg-gray-400 disabled:cursor-not-allowed py-3 text-sm font-bold transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[2px] active:translate-y-[2px]"
                         >
                           [+] VOTE UP
-                        </button>
-                        <button
+              </button>
+              <button
                           onClick={() => handleClick(id as 1|2|3, -1)}
-                          disabled={isDisabled}
+                disabled={isDisabled}
                           className="w-full bg-red-100 border-2 border-black hover:bg-red-200 active:bg-red-300 disabled:opacity-50 disabled:bg-gray-100 disabled:cursor-not-allowed py-1 text-[10px] font-bold text-red-900 transition-colors uppercase tracking-wider shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] active:shadow-none active:translate-x-[1px] active:translate-y-[1px]"
                         >
                           [-] VOTE DOWN (TRAITOR)
-                        </button>
+              </button>
                       </>
                     )}
 
@@ -1105,10 +1226,10 @@ export default function CounterGame() {
                     )}
                   </>
                 )}
-              </div>
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
+      </div>
 
         {/* Admin Statistics Panel */}
         {isAdmin && (
